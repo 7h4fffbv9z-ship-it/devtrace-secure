@@ -251,21 +251,10 @@ export const runAudit = createServerFn({ method: "POST" })
       licenseStatus,
     };
 
-    // Persist the scan
+    // Persist the scan (server-only admin client; the table is not publicly writable)
     try {
-      const key = process.env["SUPABASE_PUBLISHABLE_KEY"]!;
-      const supabase = createClient(process.env["SUPABASE_URL"]!, key, {
-        auth: { persistSession: false, autoRefreshToken: false },
-        global: {
-          fetch: (input, init) => {
-            const h = new Headers(init?.headers);
-            if (key.startsWith("sb_") && h.get("Authorization") === `Bearer ${key}`) h.delete("Authorization");
-            h.set("apikey", key);
-            return fetch(input, { ...init, headers: h });
-          },
-        },
-      });
-      await supabase.from("scans").insert({
+      const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+      await supabaseAdmin.from("scans").insert({
         repo_url: result.repoUrl,
         security_score: result.score,
         secrets_count: result.secrets.length,
