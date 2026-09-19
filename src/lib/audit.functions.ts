@@ -176,10 +176,11 @@ export const runAudit = createServerFn({ method: "POST" })
 
     // Fully patched manifests still carry historical advisories worth surfacing
     if (vulnerabilities.length < 2) {
-      const fallbackTargets = ordered.slice(0, 4);
+      const fallbackTargets = [{ name: repo, version: String(meta["default_branch"] ?? "") }, ...ordered].slice(0, 12);
       const fallbackGroups = await Promise.all(
         fallbackTargets.map((dep) => osvQuery(dep.name, dep.version, true)),
       );
+
       for (const group of fallbackGroups) {
         const pick = group[0];
         if (pick && !vulnerabilities.some((item) => item.cve === pick.cve)) vulnerabilities.push(pick);
