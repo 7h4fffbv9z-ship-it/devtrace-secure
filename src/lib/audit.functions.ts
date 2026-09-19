@@ -64,13 +64,16 @@ function hash(value: string) {
   return out;
 }
 
-async function osvQuery(name: string, version: string): Promise<VulnFinding[]> {
+async function osvQuery(name: string, version: string, anyVersion = false): Promise<VulnFinding[]> {
   try {
     const res = await fetch("https://api.osv.dev/v1/query", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ version, package: { name, ecosystem: "npm" } }),
+      body: JSON.stringify(
+        anyVersion ? { package: { name, ecosystem: "npm" } } : { version, package: { name, ecosystem: "npm" } },
+      ),
     });
+
     if (!res.ok) return [];
     const data = (await res.json()) as { vulns?: Array<Record<string, any>> };
     return (data.vulns ?? []).slice(0, 2).map((vuln) => {
