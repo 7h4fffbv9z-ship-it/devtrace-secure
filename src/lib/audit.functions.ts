@@ -260,7 +260,7 @@ export const runAudit = createServerFn({ method: "POST" })
         secrets_count: result.secrets.length,
         vulnerabilities_count: result.vulnerabilities.length,
         license_status: result.licenseStatus,
-        report_data: result as unknown as Record<string, unknown>,
+        report_data: JSON.parse(JSON.stringify(result)),
       });
     } catch {
       /* saving history must never fail the audit */
