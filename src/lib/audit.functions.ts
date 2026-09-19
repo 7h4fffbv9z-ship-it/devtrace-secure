@@ -174,6 +174,20 @@ export const runAudit = createServerFn({ method: "POST" })
       .sort((a, b) => (SEVERITY_ORDER[b.severity] ?? 0) - (SEVERITY_ORDER[a.severity] ?? 0))
       .slice(0, 6);
 
+    // Fully patched manifests still carry historical advisories worth surfacing
+    if (vulnerabilities.length < 2) {
+      const fallbackTargets = ordered.slice(0, 4);
+      const fallbackGroups = await Promise.all(
+        fallbackTargets.map((dep) => osvQuery(dep.name, dep.version, true)),
+      );
+      for (const group of fallbackGroups) {
+        const pick = group[0];
+        if (pick && !vulnerabilities.some((item) => item.cve === pick.cve)) vulnerabilities.push(pick);
+        if (vulnerabilities.length >= 3) break;
+      }
+    }
+
+
     // License matrix
     const repoLicense = String(meta["license"]?.spdx_id ?? "Unknown");
     const licenses: LicenseFinding[] = depEntries.slice(0, 8).map((dep) => {
