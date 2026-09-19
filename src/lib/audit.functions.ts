@@ -1,5 +1,4 @@
 import { createServerFn } from "@tanstack/react-start";
-import { createClient } from "@supabase/supabase-js";
 
 export type SecretFinding = {
   path: string;
@@ -251,27 +250,16 @@ export const runAudit = createServerFn({ method: "POST" })
       licenseStatus,
     };
 
-    // Persist the scan
+    // Persist the scan (server-only admin client; the table is not publicly writable)
     try {
-      const key = process.env["SUPABASE_PUBLISHABLE_KEY"]!;
-      const supabase = createClient(process.env["SUPABASE_URL"]!, key, {
-        auth: { persistSession: false, autoRefreshToken: false },
-        global: {
-          fetch: (input, init) => {
-            const h = new Headers(init?.headers);
-            if (key.startsWith("sb_") && h.get("Authorization") === `Bearer ${key}`) h.delete("Authorization");
-            h.set("apikey", key);
-            return fetch(input, { ...init, headers: h });
-          },
-        },
-      });
-      await supabase.from("scans").insert({
+      const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+      await supabaseAdmin.from("scans").insert({
         repo_url: result.repoUrl,
         security_score: result.score,
         secrets_count: result.secrets.length,
         vulnerabilities_count: result.vulnerabilities.length,
         license_status: result.licenseStatus,
-        report_data: result as unknown as Record<string, unknown>,
+        report_data: JSON.parse(JSON.stringify(result)),
       });
     } catch {
       /* saving history must never fail the audit */
@@ -281,19 +269,8 @@ export const runAudit = createServerFn({ method: "POST" })
   });
 
 export const listScans = createServerFn({ method: "GET" }).handler(async () => {
-  const key = process.env["SUPABASE_PUBLISHABLE_KEY"]!;
-  const supabase = createClient(process.env["SUPABASE_URL"]!, key, {
-    auth: { persistSession: false, autoRefreshToken: false },
-    global: {
-      fetch: (input, init) => {
-        const h = new Headers(init?.headers);
-        if (key.startsWith("sb_") && h.get("Authorization") === `Bearer ${key}`) h.delete("Authorization");
-        h.set("apikey", key);
-        return fetch(input, { ...init, headers: h });
-      },
-    },
-  });
-  const { data } = await supabase
+  const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+  const { data } = await supabaseAdmin
     .from("scans")
     .select("id, created_at, repo_url, security_score, license_status")
     .order("created_at", { ascending: false })
