@@ -1,4 +1,5 @@
 import { createFileRoute } from "@tanstack/react-router";
+import { useServerFn } from "@tanstack/react-start";
 import {
   AlertTriangle,
   ArrowRight,
@@ -27,13 +28,15 @@ import {
   TerminalSquare,
   X,
 } from "lucide-react";
-import { FormEvent, useState } from "react";
+import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn } from "@/lib/utils";
+import type { AuditResult, LicenseFinding, SecretFinding, VulnFinding } from "@/lib/audit.functions";
+import { listScans, runAudit } from "@/lib/audit.functions";
 
 export const Route = createFileRoute("/")({
   head: () => ({
@@ -55,61 +58,113 @@ export const Route = createFileRoute("/")({
   component: DevTraceDashboard,
 });
 
-const secrets = [
-  { path: "src/config/aws.ts", line: "18", type: "AWS Access Key", secret: "AKIA••••••••7K2P", tone: "critical" },
-  { path: ".github/workflows/deploy.yml", line: "42", type: "GitHub Token", secret: "ghp_••••••••9Qx4", tone: "high" },
-  { path: "lib/auth/session.ts", line: "67", type: "JWT Secret", secret: "eyJ••••••••fQ", tone: "medium" },
+const SCAN_STEPS = [
+  "Fetching repository tree...",
+  "Scanning dependencies...",
+  "Checking OSV vulnerability database...",
+  "Building license matrix...",
 ];
 
-const vulnerabilities = [
-  { name: "next", version: "13.4.7", severity: "Critical", cve: "CVE-2025-29927", summary: "Authorization bypass in middleware handling." },
-  { name: "axios", version: "1.6.1", severity: "High", cve: "CVE-2024-39338", summary: "Server-side request forgery via crafted URL." },
-  { name: "postcss", version: "8.4.21", severity: "Medium", cve: "CVE-2023-44270", summary: "Parsing error may lead to line return confusion." },
-  { name: "semver", version: "7.5.2", severity: "Low", cve: "CVE-2022-25883", summary: "Regular expression denial of service." },
-];
-
-const licenses = [
-  { name: "react", version: "18.2.0", license: "MIT", status: "Safe" },
-  { name: "typescript", version: "5.4.2", license: "Apache-2.0", status: "Safe" },
-  { name: "chart-engine", version: "2.8.1", license: "GPL-3.0", status: "Conflict" },
-  { name: "date-fns", version: "3.3.1", license: "MIT", status: "Safe" },
-];
-
-const recentAudits = [
-  { repo: "acme/web-platform", score: 88, time: "12 min ago", status: "good" },
-  { repo: "acme/payment-api", score: 64, time: "Yesterday", status: "risk" },
-  { repo: "acme/design-system", score: 96, time: "Sep 16", status: "good" },
-];
+type RecentScan = {
+  id: string;
+  created_at: string;
+  repo_url: string | null;
+  security_score: number | null;
+  license_status: string | null;
+};
 
 function StatusPill({ children, tone = "neutral" }: { children: React.ReactNode; tone?: string }) {
   return <span className={cn("status-pill", `status-${tone}`)}>{children}</span>;
 }
 
+function relativeTime(iso: string) {
+  const diff = Date.now() - new Date(iso).getTime();
+  const minutes = Math.round(diff / 60000);
+  if (minutes < 1) return "Just now";
+  if (minutes < 60) return `${minutes} min ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  return new Date(iso).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+
 function DevTraceDashboard() {
-  const [repository, setRepository] = useState("https://github.com/acme/web-platform");
+  const audit = useServerFn(runAudit);
+  const fetchScans = useServerFn(listScans);
+
+  const [repository, setRepository] = useState("https://github.com/facebook/react");
   const [isScanning, setIsScanning] = useState(false);
+  const [step, setStep] = useState(0);
   const [mobileNav, setMobileNav] = useState(false);
   const [notice, setNotice] = useState("");
+  const [error, setError] = useState("");
+  const [result, setResult] = useState<AuditResult | null>(null);
+  const [recent, setRecent] = useState<RecentScan[]>([]);
+  const timers = useRef<number[]>([]);
 
-  const repoName = repository.replace("https://github.com/", "").replace(/\/$/, "") || "acme/web-platform";
+  const loadRecent = useCallback(async () => {
+    try {
+      setRecent((await fetchScans({})) as RecentScan[]);
+    } catch {
+      /* history is optional */
+    }
+  }, [fetchScans]);
 
-  function startAudit(event?: FormEvent) {
+  useEffect(() => {
+    void loadRecent();
+    return () => timers.current.forEach((id) => window.clearTimeout(id));
+  }, [loadRecent]);
+
+  async function startAudit(event?: FormEvent) {
     event?.preventDefault();
-    if (!repository.trim()) return;
+    if (!repository.trim() || isScanning) return;
     setIsScanning(true);
+    setStep(0);
     setNotice("");
-    window.setTimeout(() => {
+    setError("");
+    timers.current.forEach((id) => window.clearTimeout(id));
+    timers.current = SCAN_STEPS.slice(1).map((_, index) =>
+      window.setTimeout(() => setStep(index + 1), (index + 1) * 1200),
+    );
+
+    try {
+      const data = (await audit({ data: { repoUrl: repository } })) as AuditResult;
+      setResult(data);
+      setNotice(`Audit complete for ${data.repo} — security score ${data.score}%. Saved to scan history.`);
+      void loadRecent();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "The audit could not be completed. Please try again.");
+    } finally {
+      timers.current.forEach((id) => window.clearTimeout(id));
+      timers.current = [];
       setIsScanning(false);
-      setNotice(`Audit complete for ${repoName}`);
-    }, 1100);
+    }
   }
 
   function generatePatch() {
-    setNotice("AI patch prepared: 3 secrets rotated and 4 dependency updates proposed.");
+    if (!result) {
+      setNotice("Run an audit first to generate a patch.");
+      return;
+    }
+    setNotice(
+      `AI patch prepared: ${result.secrets.length} credential${result.secrets.length === 1 ? "" : "s"} rotated and ${result.vulnerabilities.length} dependency upgrade${result.vulnerabilities.length === 1 ? "" : "s"} proposed.`,
+    );
   }
 
   function exportSummary() {
-    const report = `DevTrace AI Audit Summary\nRepository: ${repoName}\nSecurity score: 88%\nExposed secrets: 3\nVulnerable packages: 4\nLicense risk: 1 conflict\n`;
+    if (!result) {
+      setNotice("Run an audit first to export a summary.");
+      return;
+    }
+    const report = [
+      "DevTrace AI Audit Summary",
+      `Repository: ${result.repo}`,
+      `Security score: ${result.score}%`,
+      `Exposed secrets: ${result.secrets.length}`,
+      `Vulnerable packages: ${result.vulnerabilities.length}`,
+      `License status: ${result.licenseStatus}`,
+      "",
+      ...result.vulnerabilities.map((item) => `- ${item.name}@${item.version} ${item.severity} ${item.cve}`),
+    ].join("\n");
     const url = URL.createObjectURL(new Blob([report], { type: "text/plain" }));
     const anchor = document.createElement("a");
     anchor.href = url;
@@ -118,6 +173,13 @@ function DevTraceDashboard() {
     URL.revokeObjectURL(url);
     setNotice("Audit summary exported.");
   }
+
+  const secrets = result?.secrets ?? [];
+  const vulnerabilities = result?.vulnerabilities ?? [];
+  const licenses = result?.licenses ?? [];
+  const conflicts = licenses.filter((item) => item.status === "Conflict").length;
+  const critical = vulnerabilities.filter((item) => item.severity === "Critical").length;
+  const high = vulnerabilities.filter((item) => item.severity === "High").length;
 
   return (
     <div id="dashboard" className="min-h-screen bg-background text-foreground">
@@ -156,7 +218,7 @@ function DevTraceDashboard() {
               <h1 className="font-display text-3xl font-bold sm:text-4xl">Ship code with confidence.</h1>
               <p className="mt-2 max-w-2xl text-sm leading-6 text-muted-foreground sm:text-base">Scan any public GitHub repository for leaked credentials, vulnerable packages, and license conflicts.</p>
             </div>
-            <div className="flex items-center gap-2 text-xs text-muted-foreground"><CircleDot className="text-success" size={14} /> Last engine sync: 2 minutes ago</div>
+            <div className="flex items-center gap-2 text-xs text-muted-foreground"><CircleDot className="text-success" size={14} /> Live data from GitHub and OSV.dev</div>
           </div>
 
           <form className="scan-shell" onSubmit={startAudit}>
@@ -177,38 +239,73 @@ function DevTraceDashboard() {
           </div>
         </section>
 
+        {isScanning && (
+          <div className="mb-5 border border-primary/30 bg-primary/6 px-4 py-4" role="status" aria-live="polite">
+            <div className="flex items-center gap-2.5 text-sm font-medium text-primary">
+              <LoaderCircle className="animate-spin" size={16} /> {SCAN_STEPS[step]}
+            </div>
+            <ul className="mt-3 space-y-1.5">
+              {SCAN_STEPS.map((label, index) => (
+                <li key={label} className={cn("flex items-center gap-2 font-mono text-[11px]", index <= step ? "text-foreground" : "text-muted-foreground/60")}>
+                  {index < step ? <Check size={12} className="text-success" /> : <CircleDot size={12} className={index === step ? "text-primary" : "text-muted-foreground/50"} />}
+                  {label}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+
+        {error && (
+          <div className="mb-5 flex items-center justify-between border border-critical/40 bg-critical/8 px-4 py-3 text-sm text-critical">
+            <span className="flex items-center gap-2"><AlertTriangle size={16} />{error}</span>
+            <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => setError("")} aria-label="Dismiss error"><X /></Button>
+          </div>
+        )}
+
         {notice && <div className="mb-5 flex items-center justify-between border border-success/30 bg-success/8 px-4 py-3 text-sm text-success"><span className="flex items-center gap-2"><CheckCircle2 size={16} />{notice}</span><Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => setNotice("")} aria-label="Dismiss notification"><X /></Button></div>}
 
         <section aria-label="Audit overview" className="mb-6 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-          <MetricCard icon={<ShieldCheck />} label="Security health score" trend="+4 since last audit">
-            <div className="flex items-end gap-3"><div className="score-ring"><span>88</span><small>%</small></div><div className="pb-1"><StatusPill tone="success">Good</StatusPill><p className="mt-2 text-xs text-muted-foreground">4 checks need attention</p></div></div>
+          <MetricCard icon={<ShieldCheck />} label="Security health score" trend={result ? `${result.fileCount.toLocaleString()} files on ${result.defaultBranch}` : "Run an audit to populate"}>
+            <div className="flex items-end gap-3">
+              <div className="score-ring"><span>{result ? result.score : "—"}</span><small>%</small></div>
+              <div className="pb-1">
+                <StatusPill tone={!result ? "neutral" : result.score >= 85 ? "success" : result.score >= 60 ? "warning" : "critical"}>
+                  {!result ? "Awaiting scan" : result.score >= 85 ? "Good" : result.score >= 60 ? "Fair" : "At risk"}
+                </StatusPill>
+                <p className="mt-2 text-xs text-muted-foreground">{result ? `${secrets.length + vulnerabilities.length + conflicts} checks need attention` : "No repository scanned yet"}</p>
+              </div>
+            </div>
           </MetricCard>
-          <MetricCard icon={<KeyRound />} label="Exposed secrets" trend="Across 3 source files">
-            <div className="metric-number text-critical">3</div><p className="mt-1 text-sm text-muted-foreground">Credentials require rotation</p>
+          <MetricCard icon={<KeyRound />} label="Exposed secrets" trend={result ? `Across ${secrets.length} source file${secrets.length === 1 ? "" : "s"}` : "—"}>
+            <div className="metric-number text-critical">{result ? secrets.length : "—"}</div><p className="mt-1 text-sm text-muted-foreground">Credentials require rotation</p>
           </MetricCard>
-          <MetricCard icon={<PackageSearch />} label="Vulnerable packages" trend="1 critical, 1 high">
-            <div className="metric-number text-warning">4</div><p className="mt-1 text-sm text-muted-foreground">of 642 dependencies scanned</p>
+          <MetricCard icon={<PackageSearch />} label="Vulnerable packages" trend={result ? `${critical} critical, ${high} high` : "—"}>
+            <div className="metric-number text-warning">{result ? vulnerabilities.length : "—"}</div><p className="mt-1 text-sm text-muted-foreground">{result ? `of ${result.dependencyCount} dependencies scanned` : "Awaiting dependency scan"}</p>
           </MetricCard>
-          <MetricCard icon={<FileText />} label="License risk" trend="88 licenses identified">
-            <div className="mb-3 mt-4"><StatusPill tone="warning">Action needed</StatusPill></div><p className="text-sm text-muted-foreground">1 copyleft conflict detected</p>
+          <MetricCard icon={<FileText />} label="License risk" trend={result ? `${licenses.length} licenses identified` : "—"}>
+            <div className="mb-3 mt-4"><StatusPill tone={!result ? "neutral" : conflicts ? "warning" : "success"}>{result ? result.licenseStatus : "Awaiting scan"}</StatusPill></div>
+            <p className="text-sm text-muted-foreground">{result ? `${conflicts} copyleft conflict${conflicts === 1 ? "" : "s"} detected` : "No license data yet"}</p>
           </MetricCard>
         </section>
 
         <div className="grid items-start gap-6 xl:grid-cols-[minmax(0,1fr)_320px]">
           <section id="results" className="min-w-0">
             <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-              <div><h2 className="font-display text-xl font-semibold">Audit findings</h2><p className="mt-1 text-xs text-muted-foreground">Analyzed 1,284 files on the default branch</p></div>
-              <div className="flex items-center gap-2 text-xs text-muted-foreground"><Clock3 size={13} /> Completed in 38.4s</div>
+              <div>
+                <h2 className="font-display text-xl font-semibold">Audit findings</h2>
+                <p className="mt-1 text-xs text-muted-foreground">{result ? `${result.repo} · ${result.fileCount.toLocaleString()} files on the ${result.defaultBranch} branch` : "Start an audit to see findings"}</p>
+              </div>
+              {result && <div className="flex items-center gap-2 text-xs text-muted-foreground"><Clock3 size={13} /> Completed in {(result.durationMs / 1000).toFixed(1)}s</div>}
             </div>
             <Tabs defaultValue="secrets" className="w-full">
               <TabsList className="h-auto w-full justify-start overflow-x-auto rounded-md border border-border bg-card p-1">
-                <TabsTrigger value="secrets" className="gap-2"><KeyRound size={14} /> Secrets <span className="tab-count">3</span></TabsTrigger>
-                <TabsTrigger value="dependencies" className="gap-2"><PackageSearch size={14} /> Dependencies <span className="tab-count">4</span></TabsTrigger>
-                <TabsTrigger value="licenses" className="gap-2"><FileText size={14} /> Licenses <span className="tab-count">1</span></TabsTrigger>
+                <TabsTrigger value="secrets" className="gap-2"><KeyRound size={14} /> Secrets <span className="tab-count">{secrets.length}</span></TabsTrigger>
+                <TabsTrigger value="dependencies" className="gap-2"><PackageSearch size={14} /> Dependencies <span className="tab-count">{vulnerabilities.length}</span></TabsTrigger>
+                <TabsTrigger value="licenses" className="gap-2"><FileText size={14} /> Licenses <span className="tab-count">{conflicts}</span></TabsTrigger>
               </TabsList>
-              <TabsContent value="secrets" className="mt-3"><SecretsTable /></TabsContent>
-              <TabsContent value="dependencies" className="mt-3"><VulnerabilityList /></TabsContent>
-              <TabsContent value="licenses" className="mt-3"><LicensesTable /></TabsContent>
+              <TabsContent value="secrets" className="mt-3"><SecretsTable items={secrets} /></TabsContent>
+              <TabsContent value="dependencies" className="mt-3"><VulnerabilityList items={vulnerabilities} /></TabsContent>
+              <TabsContent value="licenses" className="mt-3"><LicensesTable items={licenses} /></TabsContent>
             </Tabs>
           </section>
 
@@ -221,9 +318,22 @@ function DevTraceDashboard() {
               </CardContent>
             </Card>
             <Card id="recent-audits" className="rounded-md border-border bg-card shadow-panel">
-              <div className="flex items-center justify-between border-b border-border px-4 py-3"><h3 className="text-sm font-semibold">Recent repo audits</h3><Button variant="ghost" size="sm" className="h-7 px-2 text-xs">View all</Button></div>
+              <div className="flex items-center justify-between border-b border-border px-4 py-3"><h3 className="text-sm font-semibold">Recent repo audits</h3><Button variant="ghost" size="sm" className="h-7 px-2 text-xs" onClick={() => void loadRecent()}>Refresh</Button></div>
               <CardContent className="p-2">
-                {recentAudits.map((audit) => <button key={audit.repo} className="recent-row" type="button" onClick={() => setRepository(`https://github.com/${audit.repo}`)}><span className="repo-icon"><Code2 size={14} /></span><span className="min-w-0 flex-1 text-left"><span className="block truncate font-mono text-xs text-foreground">{audit.repo}</span><span className="mt-1 block text-[11px] text-muted-foreground">{audit.time}</span></span><span className={cn("font-mono text-xs font-semibold", audit.status === "good" ? "text-success" : "text-warning")}>{audit.score}</span></button>)}
+                {recent.length === 0 && <p className="px-2 py-4 text-xs text-muted-foreground">No audits saved yet. Run your first scan.</p>}
+                {recent.map((scan) => {
+                  const name = (scan.repo_url ?? "").replace("https://github.com/", "");
+                  return (
+                    <button key={scan.id} className="recent-row" type="button" onClick={() => setRepository(scan.repo_url ?? "")}>
+                      <span className="repo-icon"><Code2 size={14} /></span>
+                      <span className="min-w-0 flex-1 text-left">
+                        <span className="block truncate font-mono text-xs text-foreground">{name}</span>
+                        <span className="mt-1 block text-[11px] text-muted-foreground">{relativeTime(scan.created_at)}</span>
+                      </span>
+                      <span className={cn("font-mono text-xs font-semibold", (scan.security_score ?? 0) >= 85 ? "text-success" : "text-warning")}>{scan.security_score ?? "—"}</span>
+                    </button>
+                  );
+                })}
               </CardContent>
             </Card>
           </aside>
@@ -238,16 +348,23 @@ function MetricCard({ icon, label, trend, children }: { icon: React.ReactNode; l
   return <Card className="metric-card rounded-md border-border bg-card"><CardContent className="p-5"><div className="mb-5 flex items-center justify-between"><span className="flex items-center gap-2 text-xs font-medium text-muted-foreground"><span className="text-primary [&_svg]:size-4">{icon}</span>{label}</span><ExternalLink size={13} className="text-muted-foreground" /></div>{children}<div className="mt-5 border-t border-border pt-3 text-[11px] text-muted-foreground">{trend}</div></CardContent></Card>;
 }
 
-function SecretsTable() {
-  return <div className="data-panel"><div className="table-scroll"><table><thead><tr><th>File path</th><th>Line</th><th>Secret type</th><th>Masked secret</th><th>Status</th></tr></thead><tbody>{secrets.map((item) => <tr key={item.path}><td><span className="flex items-center gap-2 font-mono text-xs"><FileCode2 size={14} className="text-muted-foreground" />{item.path}</span></td><td className="font-mono text-muted-foreground">{item.line}</td><td><StatusPill tone={item.tone}>{item.type}</StatusPill></td><td className="font-mono text-xs text-muted-foreground">{item.secret}</td><td><span className="flex items-center gap-1.5 text-xs text-critical"><AlertTriangle size={13} /> Exposed</span></td></tr>)}</tbody></table></div><PanelFooter text="3 exposed credentials found" /></div>;
+function EmptyPanel({ text }: { text: string }) {
+  return <div className="data-panel px-4 py-10 text-center text-sm text-muted-foreground">{text}</div>;
 }
 
-function VulnerabilityList() {
-  return <div className="data-panel divide-y divide-border">{vulnerabilities.map((item) => <div key={item.cve} className="grid gap-3 p-4 sm:grid-cols-[minmax(150px,1fr)_100px_110px_2fr] sm:items-center"><div><div className="flex items-center gap-2 font-mono text-sm font-semibold"><Box size={15} className="text-muted-foreground" />{item.name}</div><div className="ml-6 mt-1 font-mono text-[11px] text-muted-foreground">v{item.version}</div></div><StatusPill tone={item.severity.toLowerCase()}>{item.severity}</StatusPill><a href={`https://nvd.nist.gov/vuln/detail/${item.cve}`} target="_blank" rel="noreferrer" className="font-mono text-xs text-primary hover:underline">{item.cve}</a><p className="text-xs leading-5 text-muted-foreground">{item.summary}</p></div>)}<PanelFooter text="4 vulnerable packages found in production dependencies" /></div>;
+function SecretsTable({ items }: { items: SecretFinding[] }) {
+  if (items.length === 0) return <EmptyPanel text="No secret scan results yet — run a security audit." />;
+  return <div className="data-panel"><div className="table-scroll"><table><thead><tr><th>File path</th><th>Line</th><th>Secret type</th><th>Masked secret</th><th>Status</th></tr></thead><tbody>{items.map((item) => <tr key={`${item.path}-${item.line}`}><td><span className="flex items-center gap-2 font-mono text-xs"><FileCode2 size={14} className="text-muted-foreground" />{item.path}</span></td><td className="font-mono text-muted-foreground">{item.line}</td><td><StatusPill tone={item.tone}>{item.type}</StatusPill></td><td className="font-mono text-xs text-muted-foreground">{item.secret}</td><td><span className="flex items-center gap-1.5 text-xs text-critical"><AlertTriangle size={13} /> Exposed</span></td></tr>)}</tbody></table></div><PanelFooter text={`${items.length} exposed credential${items.length === 1 ? "" : "s"} found`} /></div>;
 }
 
-function LicensesTable() {
-  return <div className="data-panel"><div className="table-scroll"><table><thead><tr><th>Dependency</th><th>Installed version</th><th>Detected license</th><th>Compliance status</th></tr></thead><tbody>{licenses.map((item) => <tr key={item.name}><td className="font-mono text-xs font-medium">{item.name}</td><td className="font-mono text-xs text-muted-foreground">{item.version}</td><td><StatusPill>{item.license}</StatusPill></td><td>{item.status === "Safe" ? <span className="flex items-center gap-1.5 text-xs text-success"><Check size={14} /> Safe</span> : <span className="flex items-center gap-1.5 text-xs text-critical"><ShieldAlert size={14} /> Conflict</span>}</td></tr>)}</tbody></table></div><PanelFooter text="88 licenses checked against your policy" /></div>;
+function VulnerabilityList({ items }: { items: VulnFinding[] }) {
+  if (items.length === 0) return <EmptyPanel text="No dependency vulnerabilities to show yet." />;
+  return <div className="data-panel divide-y divide-border">{items.map((item) => <div key={`${item.name}-${item.cve}`} className="grid gap-3 p-4 sm:grid-cols-[minmax(150px,1fr)_100px_110px_2fr] sm:items-center"><div><div className="flex items-center gap-2 font-mono text-sm font-semibold"><Box size={15} className="text-muted-foreground" />{item.name}</div><div className="ml-6 mt-1 font-mono text-[11px] text-muted-foreground">v{item.version}</div></div><StatusPill tone={item.severity.toLowerCase()}>{item.severity}</StatusPill><a href={`https://osv.dev/vulnerability/${item.cve}`} target="_blank" rel="noreferrer" className="font-mono text-xs text-primary hover:underline">{item.cve}</a><p className="text-xs leading-5 text-muted-foreground">{item.summary}</p></div>)}<PanelFooter text={`${items.length} vulnerable package${items.length === 1 ? "" : "s"} found`} /></div>;
+}
+
+function LicensesTable({ items }: { items: LicenseFinding[] }) {
+  if (items.length === 0) return <EmptyPanel text="No license data yet — run a security audit." />;
+  return <div className="data-panel"><div className="table-scroll"><table><thead><tr><th>Dependency</th><th>Installed version</th><th>Detected license</th><th>Compliance status</th></tr></thead><tbody>{items.map((item) => <tr key={item.name}><td className="font-mono text-xs font-medium">{item.name}</td><td className="font-mono text-xs text-muted-foreground">{item.version}</td><td><StatusPill>{item.license}</StatusPill></td><td>{item.status === "Safe" ? <span className="flex items-center gap-1.5 text-xs text-success"><Check size={14} /> Safe</span> : <span className="flex items-center gap-1.5 text-xs text-critical"><ShieldAlert size={14} /> Conflict</span>}</td></tr>)}</tbody></table></div><PanelFooter text={`${items.length} licenses checked against your policy`} /></div>;
 }
 
 function PanelFooter({ text }: { text: string }) {
