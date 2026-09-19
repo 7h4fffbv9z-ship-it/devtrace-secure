@@ -14,7 +14,39 @@ export type Database = {
   }
   public: {
     Tables: {
-      [_ in never]: never
+      scans: {
+        Row: {
+          created_at: string
+          id: string
+          license_status: string | null
+          repo_url: string | null
+          report_data: Json | null
+          secrets_count: number | null
+          security_score: number | null
+          vulnerabilities_count: number | null
+        }
+        Insert: {
+          created_at?: string
+          id?: string
+          license_status?: string | null
+          repo_url?: string | null
+          report_data?: Json | null
+          secrets_count?: number | null
+          security_score?: number | null
+          vulnerabilities_count?: number | null
+        }
+        Update: {
+          created_at?: string
+          id?: string
+          license_status?: string | null
+          repo_url?: string | null
+          report_data?: Json | null
+          secrets_count?: number | null
+          security_score?: number | null
+          vulnerabilities_count?: number | null
+        }
+        Relationships: []
+      }
     }
     Views: {
       [_ in never]: never
